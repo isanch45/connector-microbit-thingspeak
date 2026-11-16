@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+# PyInstaller
+build/
+dist/
+*.spec
+# Local configuration / secrets
+config.json
+microbit_thingspeak_config.json
+microbit_thingspeak_portable.json
+.env
+.env.*
+*.secret
+# Editors
+.vscode/
+.idea/
+# Other
+Thumbs.db
+.DS_Store
