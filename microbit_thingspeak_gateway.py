@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import sys
@@ -22,8 +23,8 @@ import requests
 import serial
 from serial.tools import list_ports
 
-APP_NAME = "Connector Microbit-ThingSpeak-Serial v5.1.4"
-APP_VERSION = "5.1.4"
+APP_NAME = "Connector Microbit-ThingSpeak-Serial v5.1.5 (prova)"
+APP_VERSION = "5.1.5-prova"
 PROJECT_NAME = "Estació Meteorològica en Xarxa"
 AUTHOR = "Ignasi Sánchez Rodríguez"
 PROGRAM_NAME = "Mentoria 4.0"
@@ -41,6 +42,45 @@ PORTABLE_CONFIG_FILE = "microbit_thingspeak_portable.json"
 APP_CONFIG_FOLDER = "Microbit-ThingSpeak-Gateway"
 BAUD = 115200
 DEFAULT_INTERVAL = 15
+
+# Keep the OS awake but leave display power management untouched.
+# These flags are per-thread and must be cleared from the SAME thread.
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+
+
+class WindowsSleepGuard:
+    """Prevent idle sleep while the micro:bit USB worker is active."""
+
+    def __init__(self) -> None:
+        self.active = False
+        self._set_execution_state = None
+
+    def enable(self) -> bool:
+        if sys.platform != "win32":
+            return False
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            fn = kernel32.SetThreadExecutionState
+            fn.argtypes = [ctypes.c_uint]
+            fn.restype = ctypes.c_uint
+            if not fn(ES_CONTINUOUS | ES_SYSTEM_REQUIRED):
+                return False
+        except (OSError, AttributeError, TypeError):
+            return False
+        self._set_execution_state = fn
+        self.active = True
+        return True
+
+    def release(self) -> None:
+        if self._set_execution_state is not None:
+            try:
+                self._set_execution_state(ES_CONTINUOUS)
+            except (OSError, AttributeError, TypeError):
+                pass
+            finally:
+                self._set_execution_state = None
+                self.active = False
 
 
 def app_dir() -> str:
@@ -144,6 +184,7 @@ class GatewayApp:
         self.last_raw_response = ""
         self.last_sent_line = ""
         self.last_entry_id = ""
+        self.sleep_guard_active = False
 
         frame = ttk.Frame(root, padding=18)
         frame.pack(fill="both", expand=True)
@@ -300,6 +341,7 @@ class GatewayApp:
         technical_text = (
             f"Port sèrie: {port_text}\n"
             f"Baud rate: {BAUD}\n"
+            f"Repòs automàtic impedit: {'Sí (pantalla lliure)' if self.sleep_guard_active else 'No'}\n"
             f"Interval mínim: {self.cfg.get('interval', DEFAULT_INTERVAL)} s"
             "\n\nÚltima línia rebuda:\n"
             f"{self.last_sent_line or '(cap)'}"
@@ -357,85 +399,96 @@ class GatewayApp:
         try:
             self.ser = serial.Serial(port, BAUD, timeout=1)
             time.sleep(1.5)
-            self.ui("✅ Connectat", f"Micro:bit detectada a {port}. Esperant dades...")
         except Exception as exc:
             self.ui("Error obrint la micro:bit", str(exc))
             return
 
-        last_send = 0.0
-        interval = max(
-            DEFAULT_INTERVAL, int(self.cfg.get("interval", DEFAULT_INTERVAL))
-        )
-        while not self.stop_event.is_set():
-            try:
-                raw = self.ser.readline()
-                if not raw:
-                    continue
-                line = raw.decode("utf-8", errors="ignore").strip()
-                if not line:
-                    continue
-                parts = [x.strip() for x in line.split(",")]
-                if time.time() - last_send < interval:
-                    continue
-
-                start = 0
-                if parts and not self.is_number(parts[0]):
-                    start = 1
-                values = parts[start : start + 8]
-                if not values:
-                    continue
-
-                payload = {"api_key": self.cfg["api_key"]}
-                for i, value in enumerate(values, start=1):
-                    payload[f"field{i}"] = value
-
-                response = requests.post(
-                    "https://api.thingspeak.com/update.json",
-                    data=payload,
-                    timeout=10,
-                )
-                response_text = response.text.strip()
-                self.last_raw_response = response_text
-                self.last_sent_line = line
-
-                if response.ok and response_text not in ("", "0"):
-                    last_send = time.time()
-                    try:
-                        entry_id = str(response.json().get("entry_id", ""))
-                    except Exception:
-                        entry_id = response_text
-                    self.last_entry_id = entry_id
-                    shown = ", ".join(values)
-                    detail = f"Últim valor enviat: {shown}"
-                    if entry_id:
-                        detail += f" · Entrada {entry_id}"
-                    self.ui("✅ Enviant a ThingSpeak", detail)
-                else:
-                    self.ui(
-                        "ThingSpeak ha rebutjat l'enviament",
-                        "Revisa la connexió o la Write API Key.",
-                    )
-            except serial.SerialException:
-                self.ui(
-                    "Micro:bit desconnectada",
-                    "Torna-la a connectar i prem 'Reinicia pont'.",
-                )
-                break
-            except requests.RequestException:
-                self.ui(
-                    "Sense connexió amb ThingSpeak",
-                    "Comprova la connexió a Internet.",
-                )
-                time.sleep(2)
-            except Exception as exc:
-                self.ui("Error", str(exc))
-                time.sleep(2)
-
+        sleep_guard = WindowsSleepGuard()
+        self.sleep_guard_active = sleep_guard.enable()
+        if self.sleep_guard_active:
+            energy_note = "Repòs automàtic impedit; la pantalla es pot apagar."
+        else:
+            energy_note = "No s'ha pogut impedir el repòs; revisa l'energia de Windows."
+        self.ui("✅ Connectat", f"Micro:bit detectada a {port}. {energy_note}")
         try:
-            if self.ser and self.ser.is_open:
-                self.ser.close()
-        except Exception:
-            pass
+            last_send = 0.0
+            interval = max(
+                DEFAULT_INTERVAL, int(self.cfg.get("interval", DEFAULT_INTERVAL))
+            )
+            while not self.stop_event.is_set():
+                try:
+                    raw = self.ser.readline()
+                    if not raw:
+                        continue
+                    line = raw.decode("utf-8", errors="ignore").strip()
+                    if not line:
+                        continue
+                    parts = [x.strip() for x in line.split(",")]
+                    if time.time() - last_send < interval:
+                        continue
+
+                    start = 0
+                    if parts and not self.is_number(parts[0]):
+                        start = 1
+                    values = parts[start : start + 8]
+                    if not values:
+                        continue
+
+                    payload = {"api_key": self.cfg["api_key"]}
+                    for i, value in enumerate(values, start=1):
+                        payload[f"field{i}"] = value
+
+                    response = requests.post(
+                        "https://api.thingspeak.com/update.json",
+                        data=payload,
+                        timeout=10,
+                    )
+                    response_text = response.text.strip()
+                    self.last_raw_response = response_text
+                    self.last_sent_line = line
+
+                    if response.ok and response_text not in ("", "0"):
+                        last_send = time.time()
+                        try:
+                            entry_id = str(response.json().get("entry_id", ""))
+                        except Exception:
+                            entry_id = response_text
+                        self.last_entry_id = entry_id
+                        shown = ", ".join(values)
+                        detail = f"Últim valor enviat: {shown}"
+                        if entry_id:
+                            detail += f" · Entrada {entry_id}"
+                        self.ui("✅ Enviant a ThingSpeak", detail)
+                    else:
+                        self.ui(
+                            "ThingSpeak ha rebutjat l'enviament",
+                            "Revisa la connexió o la Write API Key.",
+                        )
+                except serial.SerialException:
+                    self.ui(
+                        "Micro:bit desconnectada",
+                        "Torna-la a connectar i prem 'Reinicia pont'.",
+                    )
+                    break
+                except requests.RequestException:
+                    self.ui(
+                        "Sense connexió amb ThingSpeak",
+                        "Comprova la connexió a Internet.",
+                    )
+                    time.sleep(2)
+                except Exception as exc:
+                    self.ui("Error", str(exc))
+                    time.sleep(2)
+
+        finally:
+            # Clear the request on the worker thread that created it.
+            sleep_guard.release()
+            self.sleep_guard_active = False
+            try:
+                if self.ser and self.ser.is_open:
+                    self.ser.close()
+            except Exception:
+                pass
 
     @staticmethod
     def is_number(text: str) -> bool:

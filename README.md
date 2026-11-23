@@ -6,6 +6,23 @@ Aplicació Windows que connecta una BBC micro:bit per USB/sèrie amb ThingSpeak.
 
 > **Estat del codi:** reconstrucció funcional de la versió 5.1.4 a partir del bytecode CPython 3.12 de l'EXE original. El fitxer Python original no s'ha recuperat literalment i el binari resultant no es considera idèntic al distribuït. Vegeu [la traçabilitat tècnica](docs/RECONSTRUCCIO.md).
 
+## Nova funció en prova · v5.1.5
+
+Mentre la micro:bit és connectada per USB, el connector impedeix que Windows
+entri en suspensió automàtica. **La pantalla es pot apagar** amb el temps normal
+configurat a Windows.
+
+- Win32 `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`,
+  sense `ES_DISPLAY_REQUIRED`.
+- Es restaura l'estat d'energia quan es desconnecta o s'atura el pont.
+- El botó **Debug** permet comprovar si la protecció està activa.
+- No evita la suspensió manual, el tancament de tapa, les polítiques del centre
+  ni els apagats per bateria baixa.
+
+**És una compilació de prova sense signar** feta a partir de la reconstrucció
+funcional de la 5.1.4, no una actualització de Microsoft Store. Cal fer la prova
+física abans de redistribuir-la.
+
 ## Funcionalitat
 
 - Connexió automàtica al port USB/COM de la micro:bit, a 115200 bauds.

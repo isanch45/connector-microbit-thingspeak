@@ -13,6 +13,44 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import microbit_thingspeak_gateway as gateway
 
 
+class SleepGuardTests(unittest.TestCase):
+    def test_system_stays_awake_without_forcing_display_on(self):
+        fn = MagicMock(return_value=1)
+        kernel32 = SimpleNamespace(SetThreadExecutionState=fn)
+        with (
+            patch.object(gateway.sys, "platform", "win32"),
+            patch.object(gateway.ctypes, "WinDLL", return_value=kernel32, create=True),
+        ):
+            guard = gateway.WindowsSleepGuard()
+            self.assertTrue(guard.enable())
+            self.assertTrue(guard.active)
+            guard.release()
+            self.assertFalse(guard.active)
+        self.assertEqual([c.args[0] for c in fn.call_args_list], [
+            gateway.ES_CONTINUOUS | gateway.ES_SYSTEM_REQUIRED,
+            gateway.ES_CONTINUOUS,
+        ])
+        self.assertFalse(fn.call_args_list[0].args[0] & 0x2)
+
+    def test_non_windows_is_noop(self):
+        with patch.object(gateway.sys, "platform", "linux"):
+            guard = gateway.WindowsSleepGuard()
+            self.assertFalse(guard.enable())
+            guard.release()
+
+    def test_api_failure_leaves_sleep_unchanged(self):
+        fn = MagicMock(return_value=0)
+        kernel32 = SimpleNamespace(SetThreadExecutionState=fn)
+        with (
+            patch.object(gateway.sys, "platform", "win32"),
+            patch.object(gateway.ctypes, "WinDLL", return_value=kernel32, create=True),
+        ):
+            guard = gateway.WindowsSleepGuard()
+            self.assertFalse(guard.enable())
+            guard.release()
+        fn.assert_called_once_with(gateway.ES_CONTINUOUS | gateway.ES_SYSTEM_REQUIRED)
+
+
 class GatewayTests(unittest.TestCase):
     def test_detect_microbit_port(self):
         ports = [
@@ -118,8 +156,13 @@ class GatewayTests(unittest.TestCase):
             patch.object(gateway.requests, "post", return_value=response) as post,
             patch.object(gateway.time, "sleep"),
             patch.object(gateway.time, "time", return_value=100.0),
+            patch.object(gateway, "WindowsSleepGuard") as sleep_guard,
         ):
+            sleep_guard.return_value.enable.return_value = True
             app.run_gateway()
+            sleep_guard.return_value.enable.assert_called_once()
+            sleep_guard.return_value.release.assert_called_once()
+            self.assertFalse(app.sleep_guard_active)
 
         post.assert_called_once()
         _, kwargs = post.call_args
